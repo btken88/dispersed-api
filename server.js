@@ -1,7 +1,8 @@
 const express = require('express')
 const dotenv = require('dotenv')
 const bodyParser = require('body-parser')
-const mongoose = require('mongoose')
+const morgan = require('morgan')
+const cors = require('cors')
 const connectDB = require('./config/db')
 const app = express()
 
@@ -12,6 +13,8 @@ connectDB();
 const Favorite = require('./models/Favorite')
 
 app.use(bodyParser.json())
+app.use(cors())
+app.use(morgan('tiny'))
 
 const server = app.listen(5000, () => {
   console.log('listening on 5000')
@@ -24,7 +27,10 @@ process.on('unhandledRejection', (err, promise) => {
 })
 
 app.get('/favorites', (req, res) => {
-
+  Favorite.find()
+    .then(data => {
+      res.status(200).json(data)
+    })
 })
 
 app.post('/favorites', (req, res) => {
