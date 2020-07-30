@@ -30,15 +30,16 @@ process.on('unhandledRejection', (err, promise) => {
   server.close(() => process.exit(1))
 })
 
-app.get('/favorites', (req, res) => {
-  Favorite.find()
+app.get('/favorites', authorizeUser, (req, res) => {
+  Favorite.find({ user_id: req.user_id })
     .then(data => {
       res.status(200).json(data)
     })
 })
 
-app.post('/favorites', (req, res) => {
-  Favorite.create(req.body)
+app.post('/favorites', authorizeUser, (req, res) => {
+  const favorite = { ...req.body, user_id: req.user_id }
+  Favorite.create(favorite)
     .then(data => {
       res.status(201).json(data)
     }).catch(console.error)
@@ -60,7 +61,7 @@ app.post('/register',
       let user = await User.findOne({ username });
       if (user) {
         return res.status(400).json({
-          msg: "User Already Exists"
+          message: "User Already Exists"
         });
       }
 
@@ -78,7 +79,7 @@ app.post('/register',
         process.env.JWT_SECRET,
         (err, token) => {
           if (err) throw err;
-          res.status(200).json({
+          res.status(201).json({
             token
           });
         }
@@ -91,14 +92,13 @@ app.post('/register',
 
 app.post('/login',
   [
-    check("username", "Please enter a valid username").isLength({ min: 1 }),
-    check("password", "Please enter a valid password").isLength({ min: 6 })
+    check('username', 'Please enter a valid username').not().isEmpty(),
+    check('password', 'Password must be at least 6 characters').isLength({ min: 6 })
   ], async (req, res) => {
     const errors = validationResult(req)
     if (!errors.isEmpty()) {
       return res.status(400).json({ errors: errors.array() })
     }
-    console.log(req.body)
     const { username, password } = req.body
     try {
       let user = await User.findOne({ username })
@@ -119,3 +119,18 @@ app.post('/login',
       res.status(500).json({ message: "Server Error" })
     }
   })
+
+function authorizeUser(req, res, next) {
+  const token = req.header('Authorization')
+  if (!token) {
+    return res.status(401).json({ message: "Authorization error" })
+  }
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET)
+    req.user_id = decoded.user_id;
+    next()
+  } catch (err) {
+    console.error(err)
+    res.status(500).send({ message: 'Invalid token' })
+  }
+}
