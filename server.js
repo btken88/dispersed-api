@@ -45,17 +45,20 @@ app.post('/favorites', authorizeUser, (req, res) => {
     }).catch(console.error)
 })
 
-app.put('/favorites', authorizeUser, (req, res) => {
-  console.log(req.body)
+app.put('/favorites/:id', authorizeUser, (req, res) => {
   Favorite.findByIdAndUpdate(
-    req.body._id,
+    req.params.id,
     req.body,
     { new: true },
     (err, favorite) => {
-      console.log('err', err, 'favorite', favorite)
       if (err) return res.status(500).send(err)
       return res.send(favorite)
     })
+})
+
+app.delete('/favorites/:id', authorizeUser, (req, res) => {
+  Favorite.findByIdAndDelete(req.params.id)
+    .then(res.status(204).json({ message: 'Favorite deleted' }))
 })
 
 app.post('/register',
