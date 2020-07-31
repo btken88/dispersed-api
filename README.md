@@ -119,4 +119,4 @@ If you have any questions or suggestions feel free to reach out to me.
 
 ## License
 
-[Click to view](https://github.com/btken88/dispersed-api/blob/master/LICENSE)
+[Click to view](https://github.com/btken88/dispersed-api/blob/master/license.txt)
