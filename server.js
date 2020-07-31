@@ -45,7 +45,7 @@ app.post('/favorites', authorizeUser, (req, res) => {
     }).catch(console.error)
 })
 
-app.put('/favorites', (req, res) => {
+app.put('/favorites', authorizeUser, (req, res) => {
   console.log(req.body)
   Favorite.findByIdAndUpdate(
     req.body._id,
