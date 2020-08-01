@@ -15,6 +15,7 @@ connectDB();
 
 const Favorite = require('./models/Favorite')
 const User = require('./models/User')
+const Bugreport = require('./models/Bugreport')
 
 app.use(bodyParser.json())
 app.use(cors())
@@ -135,6 +136,11 @@ app.post('/login',
       res.status(500).json({ errors: ["Server Error"] })
     }
   })
+
+app.post('/bug', (req, res) => {
+  Bugreport.create(req.body)
+    .then(data => res.status(201).json(data))
+})
 
 function authorizeUser(req, res, next) {
   const token = req.header('Authorization')
