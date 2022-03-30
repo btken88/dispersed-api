@@ -18,14 +18,16 @@ const User = require("./models/User");
 const Bugreport = require("./models/Bugreport");
 
 app.use(bodyParser.json());
-app.use(cors({ origin: "https://dispersed.app" }));
+app.use(cors());
 app.use(
   morgan(":method :url :status :res[content-length] - :response-time ms")
 );
 
-const server = app.listen(5000, () => {
-  console.log('listening on 5000')
-})
+const PORT = process.env.PORT || 3000;
+
+const server = app.listen(PORT, () => {
+  console.log(`Listening on port ${PORT}`);
+});
 
 // Handle promise rejections
 process.on("unhandledRejection", (err, promise) => {
