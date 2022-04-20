@@ -5,7 +5,7 @@ const jwt = require("jsonwebtoken");
 const User = require("../models/User");
 
 router.post(
-  "/register",
+  "/",
   [
     check("username", "Please enter a valid username").not().isEmpty(),
     check("email", "Please enter a valid email").isEmail(),

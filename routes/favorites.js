@@ -2,13 +2,13 @@ const router = require("express").Router();
 const jwt = require("jsonwebtoken");
 const Favorite = require("../models/Favorite");
 
-router.get("/favorites", authorizeUser, (req, res) => {
+router.get("/", authorizeUser, (req, res) => {
   Favorite.find({ user_id: req.user_id }).then((data) => {
     res.status(200).json(data);
   });
 });
 
-router.post("/favorites", authorizeUser, (req, res) => {
+router.post("/", authorizeUser, (req, res) => {
   const favorite = { ...req.body, user_id: req.user_id };
   Favorite.create(favorite)
     .then((data) => {
@@ -17,7 +17,7 @@ router.post("/favorites", authorizeUser, (req, res) => {
     .catch(console.error);
 });
 
-router.put("/favorites/:id", authorizeUser, (req, res) => {
+router.put("/:id", authorizeUser, (req, res) => {
   Favorite.findByIdAndUpdate(
     req.params.id,
     req.body,
@@ -29,7 +29,7 @@ router.put("/favorites/:id", authorizeUser, (req, res) => {
   );
 });
 
-router.delete("/favorites/:id", authorizeUser, (req, res) => {
+router.delete("/:id", authorizeUser, (req, res) => {
   Favorite.findByIdAndDelete(req.params.id).then(
     res.status(204).json({ message: "Favorite deleted" })
   );
