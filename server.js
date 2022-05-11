@@ -19,6 +19,7 @@ app.use(bodyParser.json());
 app.use(
   morgan(":method :url :status :res[content-length] - :response-time ms")
 );
+app.use(cors(/dispersed\.app/));
 
 app.use("/login", loginRouter);
 app.use("/favorites", favoritesRouter);
