@@ -16,7 +16,6 @@ const registerRouter = require("./routes/register");
 connectDB();
 
 app.use(bodyParser.json());
-app.use(cors());
 app.use(
   morgan(":method :url :status :res[content-length] - :response-time ms")
 );
