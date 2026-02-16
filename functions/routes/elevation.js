@@ -31,7 +31,7 @@ router.get('/:lat/:lng', optionalAuth, async (req, res) => {
 
     // Using MapQuest Elevation API
     // The Elevation API uses the open subdomain
-    const url = `http://open.mapquestapi.com/elevation/v1/profile?key=${MAPQUEST_API_KEY}&shapeFormat=raw&latLngCollection=${latitude},${longitude}`;
+    const url = `https://open.mapquestapi.com/elevation/v1/profile?key=${MAPQUEST_API_KEY}&shapeFormat=raw&latLngCollection=${latitude},${longitude}`;
 
     console.log('Fetching elevation from:', url.replace(MAPQUEST_API_KEY, 'REDACTED'));
 
