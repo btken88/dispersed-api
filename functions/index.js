@@ -46,19 +46,19 @@ app.use(cors({ origin: true }));
 const campsitesRouter = require('./routes/campsites');
 const weatherRouter = require('./routes/weather');
 const elevationRouter = require('./routes/elevation');
+const photosRouter = require('./routes/photos');
+const reviewsRouter = require('./routes/reviews');
+const searchRouter = require('./routes/search');
 const bugRouter = require('./routes/bug');
-const loginRouter = require('./routes/login'); // Deprecated
-const favoritesRouter = require('./routes/favorites'); // Deprecated
-const registerRouter = require('./routes/register'); // Deprecated
 
 // Use routes
 app.use('/api/campsites', campsitesRouter);
+app.use('/api/campsites', photosRouter);
+app.use('/api/campsites', reviewsRouter);
+app.use('/api/search', searchRouter);
 app.use('/api/weather', weatherRouter);
 app.use('/api/elevation', elevationRouter);
 app.use('/api/bug', bugRouter);
-app.use('/login', loginRouter); // Deprecated
-app.use('/favorites', favoritesRouter); // Deprecated
-app.use('/register', registerRouter); // Deprecated
 
 // Health check endpoint
 app.get('/', (req, res) => {
@@ -73,19 +73,19 @@ app.use((req, res) => {
 // Global error handler
 app.use((err, req, res, next) => {
   console.error(err.stack);
-  res.status(err.status || 500).json({ 
-    error: err.message || 'Internal server error' 
+  res.status(err.status || 500).json({
+    error: err.message || 'Internal server error'
   });
 });
 
 // Export Express app as 2nd Gen Firebase Function
 // Secrets will be available via process.env.OPENWEATHER_API_KEY and process.env.MAPQUEST_API_KEY
 exports.api = onRequest(
-  { 
+  {
     secrets: [openweatherApiKey, mapquestApiKey],
     region: 'us-central1',
     memory: '256MiB'
-  }, 
+  },
   app
 );
 exports.db = db;

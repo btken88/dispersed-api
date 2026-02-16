@@ -1,0 +1,1721 @@
+const request = require('supertest');
+const express = require('express');
+const admin = require('firebase-admin');
+
+// Mock Firebase Admin
+const mockFirestoreData = {};
+const mockAuth = {
+  verifyIdToken: jest.fn()
+};
+
+const mockDoc = (data) => ({
+  exists: !!data,
+  id: data?.id || 'test-id',
+  data: () => data,
+  get: jest.fn().mockResolvedValue({
+    exists: !!data,
+    id: data?.id || 'test-id',
+    data: () => data
+  })
+});
+
+const mockCollection = (collectionName) => ({
+  doc: jest.fn((id) => ({
+    get: jest.fn().mockResolvedValue(mockDoc(mockFirestoreData[collectionName]?.[id])),
+    set: jest.fn().mockResolvedValue({}),
+    update: jest.fn().mockResolvedValue({}),
+    delete: jest.fn().mockResolvedValue({})
+  })),
+  add: jest.fn().mockResolvedValue({
+    id: 'new-id',
+    get: jest.fn().mockResolvedValue(mockDoc({ id: 'new-id' }))
+  }),
+  where: jest.fn(() => ({
+    get: jest.fn().mockResolvedValue({
+      docs: [],
+      empty: true,
+      forEach: jest.fn()
+    }),
+    where: jest.fn(function() { return this; }),
+    limit: jest.fn(function() { return this; }),
+    orderBy: jest.fn(function() { return this; }),
+    startAt: jest.fn(function() { return this; }),
+    endAt: jest.fn(function() { return this; })
+  }))
+});
+
+const mockFirestore = {
+  collection: jest.fn(mockCollection),
+  runTransaction: jest.fn((callback) => callback({
+    get: jest.fn().mockResolvedValue({ docs: [], empty: true }),
+    set: jest.fn(),
+    update: jest.fn()
+  })),
+  FieldValue: {
+    serverTimestamp: jest.fn(() => new Date()),
+    arrayUnion: jest.fn((val) => [val])
+  },
+  GeoPoint: jest.fn((lat, lng) => ({ latitude: lat, longitude: lng }))
+};
+
+jest.mock('firebase-admin', () => ({
+  initializeApp: jest.fn(),
+  firestore: jest.fn(() => mockFirestore),
+  auth: jest.fn(() => mockAuth),
+  storage: jest.fn(() => ({
+    bucket: jest.fn(() => ({
+      file: jest.fn(() => ({
+        save: jest.fn().mockResolvedValue({}),
+        makePublic: jest.fn().mockResolvedValue({})
+      })),
+      name: 'test-bucket'
+    }))
+  }))
+}));
+
+// Mock fetch for external APIs
+global.fetch = jest.fn();
+
+describe('Auth Middleware', () => {
+  const { verifyFirebaseToken, optionalAuth } = require('../middleware/auth');
+  let app;
+
+  beforeEach(() => {
+    app = express();
+    app.use(express.json());
+    jest.clearAllMocks();
+  });
+
+  describe('verifyFirebaseToken', () => {
+    it('should verify valid Firebase tokens', async () => {
+      mockAuth.verifyIdToken.mockResolvedValue({
+        uid: 'user123',
+        email: 'test@example.com',
+        email_verified: true
+      });
+
+      app.get('/test', verifyFirebaseToken, (req, res) => {
+        res.json({ user: req.user });
+      });
+
+      const response = await request(app)
+        .get('/test')
+        .set('Authorization', 'Bearer valid-token');
+
+      expect(response.status).toBe(200);
+      expect(response.body.user.uid).toBe('user123');
+    });
+
+    it('should reject requests without token', async () => {
+      app.get('/test', verifyFirebaseToken, (req, res) => {
+        res.json({ success: true });
+      });
+
+      const response = await request(app).get('/test');
+
+      expect(response.status).toBe(401);
+      expect(response.body.error).toBe('No token provided');
+    });
+
+    it('should reject invalid tokens', async () => {
+      mockAuth.verifyIdToken.mockRejectedValue(new Error('Invalid token'));
+
+      app.get('/test', verifyFirebaseToken, (req, res) => {
+        res.json({ success: true });
+      });
+
+      const response = await request(app)
+        .get('/test')
+        .set('Authorization', 'Bearer invalid-token');
+
+      expect(response.status).toBe(401);
+      expect(response.body.error).toBe('Invalid or expired token');
+    });
+  });
+
+  describe('optionalAuth', () => {
+    it('should continue without token', async () => {
+      app.get('/test', optionalAuth, (req, res) => {
+        res.json({ user: req.user });
+      });
+
+      const response = await request(app).get('/test');
+
+      expect(response.status).toBe(200);
+      expect(response.body.user).toBeNull();
+    });
+
+    it('should attach user if valid token provided', async () => {
+      mockAuth.verifyIdToken.mockResolvedValue({
+        uid: 'user123',
+        email: 'test@example.com',
+        email_verified: true
+      });
+
+      app.get('/test', optionalAuth, (req, res) => {
+        res.json({ user: req.user });
+      });
+
+      const response = await request(app)
+        .get('/test')
+        .set('Authorization', 'Bearer valid-token');
+
+      expect(response.status).toBe(200);
+      expect(response.body.user.uid).toBe('user123');
+    });
+
+    it('should continue with null user on invalid token', async () => {
+      mockAuth.verifyIdToken.mockRejectedValue(new Error('Invalid token'));
+
+      app.get('/test', optionalAuth, (req, res) => {
+        res.json({ user: req.user });
+      });
+
+      const response = await request(app)
+        .get('/test')
+        .set('Authorization', 'Bearer invalid-token');
+
+      expect(response.status).toBe(200);
+      expect(response.body.user).toBeNull();
+    });
+  });
+});
+
+describe('Campsite CRUD Operations', () => {
+  let app;
+  const campsitesRouter = require('../routes/campsites');
+
+  beforeEach(() => {
+    app = express();
+    app.use(express.json());
+    app.use('/api/campsites', campsitesRouter);
+    jest.clearAllMocks();
+
+    // Reset the mock implementation for each test
+    const defaultCampsiteData = {
+      title: 'Test Campsite',
+      visibility: 'public',
+      userId: 'user123',
+      latitude: 40.0,
+      longitude: -105.0,
+      description: 'Test description'
+    };
+
+    mockFirestore.collection.mockImplementation((name) => {
+      if (name === 'campsites') {
+        return {
+          where: jest.fn().mockReturnThis(),
+          get: jest.fn().mockResolvedValue({
+            docs: [
+              {
+                id: 'campsite1',
+                data: () => defaultCampsiteData
+              }
+            ],
+            forEach: function(callback) {
+              this.docs.forEach(callback);
+            }
+          }),
+          doc: jest.fn((id) => {
+            if (id === 'campsite1' || !id) {
+              return {
+                get: jest.fn().mockResolvedValue({
+                  exists: true,
+                  id: id || 'campsite1',
+                  data: () => defaultCampsiteData
+                }),
+                update: jest.fn().mockResolvedValue({}),
+                delete: jest.fn().mockResolvedValue({})
+              };
+            }
+            return {
+              get: jest.fn().mockResolvedValue({
+                exists: false
+              })
+            };
+          }),
+          add: jest.fn().mockResolvedValue({
+            id: 'new-campsite-id',
+            get: jest.fn().mockResolvedValue({
+              id: 'new-campsite-id',
+              data: () => ({
+                ...defaultCampsiteData,
+                title: 'New Campsite'
+              })
+            })
+          })
+        };
+      }
+      return mockCollection(name);
+    });
+  });
+
+  describe('GET /api/campsites', () => {
+    it('should return public campsites for unauthenticated users', async () => {
+      const response = await request(app)
+        .get('/api/campsites');
+
+      expect(response.status).toBe(200);
+      expect(Array.isArray(response.body)).toBe(true);
+    });
+
+    it('should return public and user campsites for authenticated users', async () => {
+      mockAuth.verifyIdToken.mockResolvedValue({
+        uid: 'user123',
+        email: 'test@example.com',
+        email_verified: true
+      });
+
+      const response = await request(app)
+        .get('/api/campsites')
+        .set('Authorization', 'Bearer valid-token');
+
+      expect(response.status).toBe(200);
+      expect(Array.isArray(response.body)).toBe(true);
+    });
+  });
+
+  describe('GET /api/campsites/:id', () => {
+    it('should return a public campsite', async () => {
+      const response = await request(app)
+        .get('/api/campsites/campsite1');
+
+      expect(response.status).toBe(200);
+      expect(response.body.title).toBe('Test Campsite');
+    });
+
+    it('should return 404 for non-existent campsite', async () => {
+      mockFirestore.collection.mockReturnValue({
+        doc: jest.fn(() => ({
+          get: jest.fn().mockResolvedValue({
+            exists: false
+          })
+        }))
+      });
+
+      const response = await request(app)
+        .get('/api/campsites/nonexistent');
+
+      expect(response.status).toBe(404);
+    });
+  });
+
+  describe('POST /api/campsites', () => {
+    it('should create a campsite with valid data', async () => {
+      mockAuth.verifyIdToken.mockResolvedValue({
+        uid: 'user123',
+        email: 'test@example.com',
+        email_verified: true
+      });
+
+      const response = await request(app)
+        .post('/api/campsites')
+        .set('Authorization', 'Bearer valid-token')
+        .send({
+          latitude: 40.0,
+          longitude: -105.0,
+          title: 'New Campsite',
+          description: 'A great spot',
+          visibility: 'public'
+        });
+
+      expect(response.status).toBe(201);
+    });
+
+    it('should reject creation without authentication', async () => {
+      const response = await request(app)
+        .post('/api/campsites')
+        .send({
+          latitude: 40.0,
+          longitude: -105.0,
+          title: 'New Campsite',
+          visibility: 'public'
+        });
+
+      expect(response.status).toBe(401);
+    });
+
+    it('should validate latitude range', async () => {
+      mockAuth.verifyIdToken.mockResolvedValue({
+        uid: 'user123',
+        email: 'test@example.com',
+        email_verified: true
+      });
+
+      const response = await request(app)
+        .post('/api/campsites')
+        .set('Authorization', 'Bearer valid-token')
+        .send({
+          latitude: 91,
+          longitude: -105.0,
+          title: 'Invalid Campsite',
+          visibility: 'public'
+        });
+
+      expect(response.status).toBe(400);
+    });
+
+    it('should validate longitude range', async () => {
+      mockAuth.verifyIdToken.mockResolvedValue({
+        uid: 'user123',
+        email: 'test@example.com',
+        email_verified: true
+      });
+
+      const response = await request(app)
+        .post('/api/campsites')
+        .set('Authorization', 'Bearer valid-token')
+        .send({
+          latitude: 40.0,
+          longitude: 181,
+          title: 'Invalid Campsite',
+          visibility: 'public'
+        });
+
+      expect(response.status).toBe(400);
+    });
+  });
+
+  describe('PUT /api/campsites/:id', () => {
+    it('should update campsite by owner', async () => {
+      mockAuth.verifyIdToken.mockResolvedValue({
+        uid: 'user123',
+        email: 'test@example.com',
+        email_verified: true
+      });
+
+      const response = await request(app)
+        .put('/api/campsites/campsite1')
+        .set('Authorization', 'Bearer valid-token')
+        .send({
+          title: 'Updated Title'
+        });
+
+      expect(response.status).toBe(200);
+    });
+
+    it('should reject update by non-owner', async () => {
+      mockAuth.verifyIdToken.mockResolvedValue({
+        uid: 'different-user',
+        email: 'other@example.com',
+        email_verified: true
+      });
+
+      const response = await request(app)
+        .put('/api/campsites/campsite1')
+        .set('Authorization', 'Bearer valid-token')
+        .send({
+          title: 'Updated Title'
+        });
+
+      expect(response.status).toBe(403);
+    });
+  });
+
+  describe('DELETE /api/campsites/:id', () => {
+    it('should delete campsite by owner', async () => {
+      mockAuth.verifyIdToken.mockResolvedValue({
+        uid: 'user123',
+        email: 'test@example.com',
+        email_verified: true
+      });
+
+      const response = await request(app)
+        .delete('/api/campsites/campsite1')
+        .set('Authorization', 'Bearer valid-token');
+
+      expect(response.status).toBe(204);
+    });
+
+    it('should reject deletion by non-owner', async () => {
+      mockAuth.verifyIdToken.mockResolvedValue({
+        uid: 'different-user',
+        email: 'other@example.com',
+        email_verified: true
+      });
+
+      const response = await request(app)
+        .delete('/api/campsites/campsite1')
+        .set('Authorization', 'Bearer valid-token');
+
+      expect(response.status).toBe(403);
+    });
+  });
+});
+
+describe('Weather API', () => {
+  let app;
+  const weatherRouter = require('../routes/weather');
+
+  beforeEach(() => {
+    app = express();
+    app.use('/api/weather', weatherRouter);
+    jest.clearAllMocks();
+    global.fetch = jest.fn();
+  });
+
+  describe('GET /api/weather/:lat/:lng', () => {
+    it('should return weather data for valid coordinates', async () => {
+      process.env.OPENWEATHER_API_KEY = 'test-api-key';
+
+      global.fetch.mockResolvedValue({
+        ok: true,
+        json: jest.fn().mockResolvedValue({
+          current: { temp: 72 }
+        })
+      });
+
+      const response = await request(app)
+        .get('/api/weather/40.0/-105.0');
+
+      expect(response.status).toBe(200);
+      expect(response.body.current).toBeDefined();
+    });
+
+    it('should reject invalid latitude', async () => {
+      const response = await request(app)
+        .get('/api/weather/91/-105.0');
+
+      expect(response.status).toBe(400);
+      expect(response.body.error).toContain('latitude');
+    });
+
+    it('should reject invalid longitude', async () => {
+      const response = await request(app)
+        .get('/api/weather/40.0/181');
+
+      expect(response.status).toBe(400);
+      expect(response.body.error).toContain('longitude');
+    });
+
+    it('should handle missing API key', async () => {
+      delete process.env.OPENWEATHER_API_KEY;
+
+      const response = await request(app)
+        .get('/api/weather/40.0/-105.0');
+
+      expect(response.status).toBe(503);
+    });
+
+    it('should handle API errors', async () => {
+      process.env.OPENWEATHER_API_KEY = 'test-api-key';
+
+      global.fetch.mockResolvedValue({
+        ok: false,
+        status: 401,
+        json: jest.fn().mockResolvedValue({ message: 'Invalid API key' })
+      });
+
+      const response = await request(app)
+        .get('/api/weather/40.0/-105.0');
+
+      expect(response.status).toBe(502);
+    });
+  });
+});
+
+describe('Elevation API', () => {
+  let app;
+  const elevationRouter = require('../routes/elevation');
+
+  beforeEach(() => {
+    app = express();
+    app.use('/api/elevation', elevationRouter);
+    jest.clearAllMocks();
+    global.fetch = jest.fn();
+  });
+
+  describe('GET /api/elevation/:lat/:lng', () => {
+    it('should return elevation data for valid coordinates', async () => {
+      process.env.MAPQUEST_API_KEY = 'test-api-key';
+
+      global.fetch.mockResolvedValue({
+        ok: true,
+        json: jest.fn().mockResolvedValue({
+          elevationProfile: [{ height: 1000 }]
+        })
+      });
+
+      const response = await request(app)
+        .get('/api/elevation/40.0/-105.0');
+
+      expect(response.status).toBe(200);
+      expect(response.body.elevation).toBeDefined();
+      expect(response.body.elevationFeet).toBeDefined();
+    });
+
+    it('should reject invalid latitude', async () => {
+      const response = await request(app)
+        .get('/api/elevation/91/-105.0');
+
+      expect(response.status).toBe(400);
+      expect(response.body.error).toContain('latitude');
+    });
+
+    it('should reject invalid longitude', async () => {
+      const response = await request(app)
+        .get('/api/elevation/40.0/181');
+
+      expect(response.status).toBe(400);
+      expect(response.body.error).toContain('longitude');
+    });
+
+    it('should handle missing API key', async () => {
+      delete process.env.MAPQUEST_API_KEY;
+
+      const response = await request(app)
+        .get('/api/elevation/40.0/-105.0');
+
+      expect(response.status).toBe(503);
+    });
+
+    it('should handle API errors', async () => {
+      process.env.MAPQUEST_API_KEY = 'test-api-key';
+
+      global.fetch.mockResolvedValue({
+        ok: false,
+        status: 401,
+        json: jest.fn().mockResolvedValue({ message: 'Invalid API key' })
+      });
+
+      const response = await request(app)
+        .get('/api/elevation/40.0/-105.0');
+
+      expect(response.status).toBe(502);
+    });
+  });
+});
+
+describe('Reviews API', () => {
+  let app;
+  const reviewsRouter = require('../routes/reviews');
+
+  beforeEach(() => {
+    app = express();
+    app.use(express.json());
+    app.use('/api/campsites', reviewsRouter);
+    jest.clearAllMocks();
+
+    // Mock the Firestore transaction
+    mockFirestore.runTransaction.mockImplementation(async (callback) => {
+      const transaction = {
+        get: jest.fn().mockResolvedValue({
+          size: 0,
+          docs: [],
+          forEach: jest.fn()
+        }),
+        set: jest.fn(),
+        update: jest.fn()
+      };
+      await callback(transaction);
+      return Promise.resolve();
+    });
+
+    // Mock the collections
+    mockFirestore.collection.mockImplementation((name) => {
+      if (name === 'campsites') {
+        return {
+          doc: jest.fn(() => ({
+            get: jest.fn().mockResolvedValue({
+              exists: true,
+              data: () => ({ title: 'Test Campsite', userId: 'owner123' })
+            }),
+            update: jest.fn().mockResolvedValue({})
+          }))
+        };
+      }
+      if (name === 'reviews') {
+        return {
+          doc: jest.fn(() => ({
+            id: 'review-id',
+            set: jest.fn().mockResolvedValue({})
+          })),
+          where: jest.fn(() => ({
+            where: jest.fn(function() { return this; }),
+            limit: jest.fn(() => ({
+              get: jest.fn().mockResolvedValue({
+                empty: true,
+                docs: []
+              })
+            })),
+            get: jest.fn().mockResolvedValue({
+              empty: true,
+              docs: []
+            })
+          }))
+        };
+      }
+      if (name === 'ratingLimits') {
+        return {
+          add: jest.fn().mockResolvedValue({}),
+          where: jest.fn(() => ({
+            where: jest.fn(function() { return this; }),
+            get: jest.fn().mockResolvedValue({
+              empty: true,
+              docs: []
+            })
+          }))
+        };
+      }
+      return mockCollection(name);
+    });
+  });
+
+  describe('POST /api/campsites/:id/reviews', () => {
+    it('should create an authenticated review with comment', async () => {
+      mockAuth.verifyIdToken.mockResolvedValue({
+        uid: 'user123',
+        email: 'test@example.com',
+        email_verified: true
+      });
+
+      const response = await request(app)
+        .post('/api/campsites/campsite1/reviews')
+        .set('Authorization', 'Bearer valid-token')
+        .send({
+          rating: 5,
+          comment: 'Great campsite!'
+        });
+
+      expect(response.status).toBe(201);
+      expect(response.body.reviewId).toBeDefined();
+    });
+
+    it('should create anonymous rating without comment', async () => {
+      const response = await request(app)
+        .post('/api/campsites/campsite1/reviews')
+        .send({
+          rating: 4
+        });
+
+      expect(response.status).toBe(201);
+    });
+
+    it('should reject invalid rating', async () => {
+      const response = await request(app)
+        .post('/api/campsites/campsite1/reviews')
+        .send({
+          rating: 6
+        });
+
+      expect(response.status).toBe(400);
+    });
+
+    it('should reject comment from anonymous user', async () => {
+      const response = await request(app)
+        .post('/api/campsites/campsite1/reviews')
+        .send({
+          rating: 5,
+          comment: 'This should fail'
+        });
+
+      expect(response.status).toBe(400);
+    });
+
+    it('should reject review for non-existent campsite', async () => {
+      mockFirestore.collection.mockImplementation((name) => {
+        if (name === 'campsites') {
+          return {
+            doc: jest.fn(() => ({
+              get: jest.fn().mockResolvedValue({
+                exists: false
+              })
+            }))
+          };
+        }
+        return mockCollection(name);
+      });
+
+      const response = await request(app)
+        .post('/api/campsites/nonexistent/reviews')
+        .send({
+          rating: 5
+        });
+
+      expect(response.status).toBe(404);
+    });
+  });
+});
+
+describe('Bug Report API', () => {
+  let app;
+  const bugRouter = require('../routes/bug');
+
+  beforeEach(() => {
+    app = express();
+    app.use(express.json());
+    app.use('/api/bug', bugRouter);
+    jest.clearAllMocks();
+  });
+
+  describe('POST /api/bug', () => {
+    it('should accept valid bug report', async () => {
+      const response = await request(app)
+        .post('/api/bug')
+        .send({
+          name: 'Test User',
+          email: 'test@example.com',
+          bug: 'This is a bug description'
+        });
+
+      expect(response.status).toBe(200);
+      expect(response.body.success).toBe(true);
+    });
+
+    it('should reject bug report without name', async () => {
+      const response = await request(app)
+        .post('/api/bug')
+        .send({
+          email: 'test@example.com',
+          bug: 'This is a bug description'
+        });
+
+      expect(response.status).toBe(400);
+    });
+
+    it('should reject bug report without email', async () => {
+      const response = await request(app)
+        .post('/api/bug')
+        .send({
+          name: 'Test User',
+          bug: 'This is a bug description'
+        });
+
+      expect(response.status).toBe(400);
+    });
+
+    it('should reject bug report without bug description', async () => {
+      const response = await request(app)
+        .post('/api/bug')
+        .send({
+          name: 'Test User',
+          email: 'test@example.com'
+        });
+
+      expect(response.status).toBe(400);
+    });
+  });
+});
+
+describe('Search API', () => {
+  let app;
+  const searchRouter = require('../routes/search');
+
+  beforeEach(() => {
+    app = express();
+    app.use('/api/search', searchRouter);
+    jest.clearAllMocks();
+
+    // Mock campsites collection for search
+    mockFirestore.collection.mockImplementation((name) => {
+      if (name === 'campsites') {
+        return {
+          where: jest.fn(() => ({
+            get: jest.fn().mockResolvedValue({
+              docs: [
+                {
+                  id: 'campsite1',
+                  data: () => ({
+                    title: 'Mountain Campsite',
+                    visibility: 'public',
+                    location: { latitude: 40.0, longitude: -105.0 },
+                    averageRating: 4.5,
+                    hasPhotos: true,
+                    geohash: 'test-hash'
+                  })
+                }
+              ]
+            }),
+            orderBy: jest.fn(function() { return this; }),
+            startAt: jest.fn(function() { return this; }),
+            endAt: jest.fn(function() { return this; })
+          }))
+        };
+      }
+      return mockCollection(name);
+    });
+  });
+
+  describe('GET /api/search/campsites', () => {
+    it('should search campsites with text query', async () => {
+      const response = await request(app)
+        .get('/api/search/campsites')
+        .query({ q: 'mountain' });
+
+      expect(response.status).toBe(200);
+      expect(response.body.results).toBeDefined();
+      expect(Array.isArray(response.body.results)).toBe(true);
+    });
+
+    it('should search campsites by location', async () => {
+      const response = await request(app)
+        .get('/api/search/campsites')
+        .query({
+          lat: 40.0,
+          lng: -105.0,
+          radius: 10
+        });
+
+      expect(response.status).toBe(200);
+      expect(response.body.results).toBeDefined();
+      expect(Array.isArray(response.body.results)).toBe(true);
+    });
+
+    it('should filter by minimum rating', async () => {
+      const response = await request(app)
+        .get('/api/search/campsites')
+        .query({ minRating: 4 });
+
+      expect(response.status).toBe(200);
+      expect(response.body.results).toBeDefined();
+      expect(Array.isArray(response.body.results)).toBe(true);
+    });
+
+    it('should filter by hasPhotos', async () => {
+      const response = await request(app)
+        .get('/api/search/campsites')
+        .query({ hasPhotos: 'true' });
+
+      expect(response.status).toBe(200);
+      expect(response.body.results).toBeDefined();
+      expect(Array.isArray(response.body.results)).toBe(true);
+    });
+
+    it('should support pagination', async () => {
+      const response = await request(app)
+        .get('/api/search/campsites')
+        .query({ page: 1, limit: 10 });
+
+      expect(response.status).toBe(200);
+      expect(response.body.results).toBeDefined();
+      expect(response.body.pagination).toBeDefined();
+      expect(Array.isArray(response.body.results)).toBe(true);
+    });
+  });
+});
+
+describe('Photos API', () => {
+  let app;
+  const photosRouter = require('../routes/photos');
+
+  beforeEach(() => {
+    app = express();
+    app.use(express.json());
+    app.use('/api/campsites', photosRouter);
+    jest.clearAllMocks();
+
+    // Mock campsites collection
+    mockFirestore.collection.mockImplementation((name) => {
+      if (name === 'campsites') {
+        return {
+          doc: jest.fn(() => ({
+            get: jest.fn().mockResolvedValue({
+              exists: true,
+              data: () => ({
+                userId: 'user123',
+                photos: []
+              })
+            }),
+            update: jest.fn().mockResolvedValue({})
+          }))
+        };
+      }
+      return mockCollection(name);
+    });
+  });
+
+  describe('POST /api/campsites/:id/photos', () => {
+    it('should require authentication', async () => {
+      const response = await request(app)
+        .post('/api/campsites/campsite1/photos');
+
+      expect(response.status).toBe(401);
+    });
+
+    it('should reject upload to non-existent campsite', async () => {
+      mockAuth.verifyIdToken.mockResolvedValue({
+        uid: 'user123',
+        email: 'test@example.com',
+        email_verified: true
+      });
+
+      mockFirestore.collection.mockImplementation((name) => {
+        if (name === 'campsites') {
+          return {
+            doc: jest.fn(() => ({
+              get: jest.fn().mockResolvedValue({
+                exists: false
+              })
+            }))
+          };
+        }
+        return mockCollection(name);
+      });
+
+      const response = await request(app)
+        .post('/api/campsites/nonexistent/photos')
+        .set('Authorization', 'Bearer valid-token');
+
+      expect(response.status).toBe(404);
+    });
+
+    it('should reject upload by non-owner', async () => {
+      mockAuth.verifyIdToken.mockResolvedValue({
+        uid: 'different-user',
+        email: 'other@example.com',
+        email_verified: true
+      });
+
+      const response = await request(app)
+        .post('/api/campsites/campsite1/photos')
+        .set('Authorization', 'Bearer valid-token');
+
+      expect(response.status).toBe(403);
+    });
+  });
+});
+
+describe('Additional Route Coverage Tests', () => {
+  let app;
+
+  describe('Campsites - Error Handling', () => {
+    const campsitesRouter = require('../routes/campsites');
+
+    beforeEach(() => {
+      app = express();
+      app.use(express.json());
+      app.use('/api/campsites', campsitesRouter);
+      jest.clearAllMocks();
+    });
+
+    it('should handle Firestore errors on GET', async () => {
+      mockFirestore.collection.mockImplementation(() => ({
+        where: jest.fn(() => ({
+          get: jest.fn().mockRejectedValue(new Error('Firestore error'))
+        }))
+      }));
+
+      const response = await request(app).get('/api/campsites');
+      expect(response.status).toBe(500);
+    });
+
+    it('should handle validation errors on title length', async () => {
+      mockAuth.verifyIdToken.mockResolvedValue({
+        uid: 'user123',
+        email: 'test@example.com',
+        email_verified: true
+      });
+
+      const response = await request(app)
+        .post('/api/campsites')
+        .set('Authorization', 'Bearer valid-token')
+        .send({
+          latitude: 40.0,
+          longitude: -105.0,
+          title: '', // Empty title
+          visibility: 'public'
+        });
+
+      expect(response.status).toBe(400);
+    });
+
+    it('should handle invalid visibility value', async () => {
+      mockAuth.verifyIdToken.mockResolvedValue({
+        uid: 'user123',
+        email: 'test@example.com',
+        email_verified: true
+      });
+
+      const response = await request(app)
+        .post('/api/campsites')
+        .set('Authorization', 'Bearer valid-token')
+        .send({
+          latitude: 40.0,
+          longitude: -105.0,
+          title: 'Test',
+          visibility: 'invalid' // Invalid visibility
+        });
+
+      expect(response.status).toBe(400);
+    });
+  });
+
+  describe('Weather - Additional Coverage', () => {
+    const weatherRouter = require('../routes/weather');
+
+    beforeEach(() => {
+      app = express();
+      app.use('/api/weather', weatherRouter);
+      jest.clearAllMocks();
+    });
+
+    it('should handle non-numeric latitude', async () => {
+      const response = await request(app)
+        .get('/api/weather/abc/-105.0');
+
+      expect(response.status).toBe(400);
+    });
+
+    it('should handle non-numeric longitude', async () => {
+      const response = await request(app)
+        .get('/api/weather/40.0/xyz');
+
+      expect(response.status).toBe(400);
+    });
+
+    it('should handle fetch errors', async () => {
+      process.env.OPENWEATHER_API_KEY = 'test-key';
+      global.fetch.mockRejectedValue(new Error('Network error'));
+
+      const response = await request(app)
+        .get('/api/weather/40.0/-105.0');
+
+      expect(response.status).toBe(500);
+    });
+  });
+
+  describe('Elevation - Additional Coverage', () => {
+    const elevationRouter = require('../routes/elevation');
+
+    beforeEach(() => {
+      app = express();
+      app.use('/api/elevation', elevationRouter);
+      jest.clearAllMocks();
+    });
+
+    it('should handle non-numeric latitude', async () => {
+      const response = await request(app)
+        .get('/api/elevation/abc/-105.0');
+
+      expect(response.status).toBe(400);
+    });
+
+    it('should handle non-numeric longitude', async () => {
+      const response = await request(app)
+        .get('/api/elevation/40.0/xyz');
+
+      expect(response.status).toBe(400);
+    });
+
+    it('should handle missing elevation data', async () => {
+      process.env.MAPQUEST_API_KEY = 'test-key';
+      global.fetch.mockResolvedValue({
+        ok: true,
+        json: jest.fn().mockResolvedValue({
+          elevationProfile: [] // Empty array
+        })
+      });
+
+      const response = await request(app)
+        .get('/api/elevation/40.0/-105.0');
+
+      expect(response.status).toBe(500);
+    });
+
+    it('should handle fetch errors', async () => {
+      process.env.MAPQUEST_API_KEY = 'test-key';
+      global.fetch.mockRejectedValue(new Error('Network error'));
+
+      const response = await request(app)
+        .get('/api/elevation/40.0/-105.0');
+
+      expect(response.status).toBe(500);
+    });
+  });
+
+  describe('Search - Additional Coverage', () => {
+    const searchRouter = require('../routes/search');
+
+    beforeEach(() => {
+      app = express();
+      app.use('/api/search', searchRouter);
+      jest.clearAllMocks();
+
+      mockFirestore.collection.mockImplementation((name) => {
+        if (name === 'campsites') {
+          return {
+            where: jest.fn(() => ({
+              get: jest.fn().mockResolvedValue({
+                docs: [
+                  {
+                    id: 'campsite1',
+                    data: () => ({
+                      title: 'Mountain Campsite',
+                      description: 'A great spot',
+                      visibility: 'public',
+                      location: { latitude: 40.0, longitude: -105.0 },
+                      averageRating: 4.5,
+                      reviewCount: 10,
+                      hasPhotos: true,
+                      geohash: 'test-hash',
+                      createdAt: { toMillis: () => Date.now() }
+                    })
+                  }
+                ]
+              }),
+              orderBy: jest.fn(function() { return this; }),
+              startAt: jest.fn(function() { return this; }),
+              endAt: jest.fn(function() { return this; })
+            }))
+          };
+        }
+        return mockCollection(name);
+      });
+    });
+
+    it('should sort by rating', async () => {
+      const response = await request(app)
+        .get('/api/search/campsites')
+        .query({ sort: 'rating' });
+
+      expect(response.status).toBe(200);
+      expect(response.body.results).toBeDefined();
+    });
+
+    it('should sort by review count', async () => {
+      const response = await request(app)
+        .get('/api/search/campsites')
+        .query({ sort: 'reviewCount' });
+
+      expect(response.status).toBe(200);
+      expect(response.body.results).toBeDefined();
+    });
+
+    it('should sort by distance when location provided', async () => {
+      const response = await request(app)
+        .get('/api/search/campsites')
+        .query({
+          lat: 40.0,
+          lng: -105.0,
+          radius: 10,
+          sort: 'distance'
+        });
+
+      expect(response.status).toBe(200);
+      expect(response.body.results).toBeDefined();
+    });
+
+    it('should handle Firestore errors', async () => {
+      mockFirestore.collection.mockImplementation(() => ({
+        where: jest.fn(() => ({
+          get: jest.fn().mockRejectedValue(new Error('Database error'))
+        }))
+      }));
+
+      const response = await request(app)
+        .get('/api/search/campsites');
+
+      expect(response.status).toBe(500);
+    });
+  });
+
+  describe('Reviews - Error Coverage', () => {
+    const reviewsRouter = require('../routes/reviews');
+
+    beforeEach(() => {
+      app = express();
+      app.use(express.json());
+      app.use('/api/campsites', reviewsRouter);
+      jest.clearAllMocks();
+    });
+
+    it('should reject comment longer than 1000 characters', async () => {
+      mockAuth.verifyIdToken.mockResolvedValue({
+        uid: 'user123',
+        email: 'test@example.com',
+        email_verified: true
+      });
+
+      mockFirestore.collection.mockImplementation((name) => {
+        if (name === 'campsites') {
+          return {
+            doc: jest.fn(() => ({
+              get: jest.fn().mockResolvedValue({
+                exists: true,
+                data: () => ({ title: 'Test' })
+              })
+            }))
+          };
+        }
+        return mockCollection(name);
+      });
+
+      const longComment = 'a'.repeat(1001);
+
+      const response = await request(app)
+        .post('/api/campsites/test/reviews')
+        .set('Authorization', 'Bearer valid-token')
+        .send({
+          rating: 5,
+          comment: longComment
+        });
+
+      expect(response.status).toBe(400);
+    });
+
+    it('should reject non-integer rating', async () => {
+      const response = await request(app)
+        .post('/api/campsites/test/reviews')
+        .send({
+          rating: 3.5
+        });
+
+      expect(response.status).toBe(400);
+    });
+
+    it('should reject rating below 1', async () => {
+      const response = await request(app)
+        .post('/api/campsites/test/reviews')
+        .send({
+          rating: 0
+        });
+
+      expect(response.status).toBe(400);
+    });
+  });
+
+  describe('Campsites - Visibility and Access Control', () => {
+    const campsitesRouter = require('../routes/campsites');
+
+    beforeEach(() => {
+      app = express();
+      app.use(express.json());
+      app.use('/api/campsites', campsitesRouter);
+      jest.clearAllMocks();
+    });
+
+    it('should allow access to unlisted campsite without auth', async () => {
+      mockFirestore.collection.mockImplementation(() => ({
+        doc: jest.fn(() => ({
+          get: jest.fn().mockResolvedValue({
+            exists: true,
+            id: 'test-id',
+            data: () => ({
+              title: 'Test',
+              visibility: 'unlisted',
+              userId: 'owner123'
+            })
+          })
+        }))
+      }));
+
+      const response = await request(app)
+        .get('/api/campsites/test-id');
+
+      expect(response.status).toBe(200);
+    });
+
+    it('should deny access to private campsite without auth', async () => {
+      mockFirestore.collection.mockImplementation(() => ({
+        doc: jest.fn(() => ({
+          get: jest.fn().mockResolvedValue({
+            exists: true,
+            id: 'test-id',
+            data: () => ({
+              title: 'Test',
+              visibility: 'private',
+              userId: 'owner123'
+            })
+          })
+        }))
+      }));
+
+      const response = await request(app)
+        .get('/api/campsites/test-id');
+
+      expect(response.status).toBe(403);
+    });
+
+    it('should allow owner to view private campsite', async () => {
+      mockAuth.verifyIdToken.mockResolvedValue({
+        uid: 'owner123',
+        email: 'owner@test.com',
+        email_verified: true
+      });
+
+      mockFirestore.collection.mockImplementation(() => ({
+        doc: jest.fn(() => ({
+          get: jest.fn().mockResolvedValue({
+            exists: true,
+            id: 'test-id',
+            data: () => ({
+              title: 'Test',
+              visibility: 'private',
+              userId: 'owner123'
+            })
+          })
+        }))
+      }));
+
+      const response = await request(app)
+        .get('/api/campsites/test-id')
+        .set('Authorization', 'Bearer valid-token');
+
+      expect(response.status).toBe(200);
+    });
+
+    it('should handle description in campsite creation', async () => {
+      mockAuth.verifyIdToken.mockResolvedValue({
+        uid: 'user123',
+        email: 'test@example.com',
+        email_verified: true
+      });
+
+      mockFirestore.collection.mockImplementation(() => ({
+        add: jest.fn().mockResolvedValue({
+          id: 'new-id',
+          get: jest.fn().mockResolvedValue({
+            id: 'new-id',
+            data: () => ({
+              title: 'Test',
+              description: 'A nice place',
+              latitude: 40.0,
+              longitude: -105.0,
+              visibility: 'public'
+            })
+          })
+        })
+      }));
+
+      const response = await request(app)
+        .post('/api/campsites')
+        .set('Authorization', 'Bearer valid-token')
+        .send({
+          latitude: 40.0,
+          longitude: -105.0,
+          title: 'Test',
+          description: 'A nice place',
+          visibility: 'public'
+        });
+
+      expect(response.status).toBe(201);
+    });
+
+    it('should handle very long description validation', async () => {
+      mockAuth.verifyIdToken.mockResolvedValue({
+        uid: 'user123',
+        email: 'test@example.com',
+        email_verified: true
+      });
+
+      const response = await request(app)
+        .post('/api/campsites')
+        .set('Authorization', 'Bearer valid-token')
+        .send({
+          latitude: 40.0,
+          longitude: -105.0,
+          title: 'Test',
+          description: 'a'.repeat(2001), // Too long
+          visibility: 'public'
+        });
+
+      expect(response.status).toBe(400);
+    });
+
+    it('should handle validation errors on PUT', async () => {
+      mockAuth.verifyIdToken.mockResolvedValue({
+        uid: 'user123',
+        email: 'test@example.com',
+        email_verified: true
+      });
+
+      mockFirestore.collection.mockImplementation(() => ({
+        doc: jest.fn(() => ({
+          get: jest.fn().mockResolvedValue({
+            exists: true,
+            data: () => ({
+              userId: 'user123',
+              title: 'Test'
+            })
+          }),
+          update: jest.fn().mockResolvedValue({})
+        }))
+      }));
+
+      const response = await request(app)
+        .put('/api/campsites/test-id')
+        .set('Authorization', 'Bearer valid-token')
+        .send({
+          description: 'a'.repeat(2001) // Too long
+        });
+
+      expect(response.status).toBe(400);
+    });
+  });
+
+  describe('Photos - Additional Error Cases', () => {
+    const photosRouter = require('../routes/photos');
+
+    beforeEach(() => {
+      app = express();
+      app.use(express.json());
+      app.use('/api/campsites', photosRouter);
+      jest.clearAllMocks();
+    });
+
+    it('should reject photo upload when campsite has 3 photos', async () => {
+      mockAuth.verifyIdToken.mockResolvedValue({
+        uid: 'user123',
+        email: 'test@example.com',
+        email_verified: true
+      });
+
+      mockFirestore.collection.mockImplementation(() => ({
+        doc: jest.fn(() => ({
+          get: jest.fn().mockResolvedValue({
+            exists: true,
+            data: () => ({
+              userId: 'user123',
+              photos: [{ id: '1' }, { id: '2' }, { id: '3' }]
+            })
+          })
+        }))
+      }));
+
+      const response = await request(app)
+        .post('/api/campsites/test-id/photos')
+        .set('Authorization', 'Bearer valid-token');
+
+      expect(response.status).toBe(400);
+    });
+
+    it('should delete photo by owner', async () => {
+      mockAuth.verifyIdToken.mockResolvedValue({
+        uid: 'user123',
+        email: 'test@example.com',
+        email_verified: true
+      });
+
+      mockFirestore.collection.mockImplementation(() => ({
+        doc: jest.fn(() => ({
+          get: jest.fn().mockResolvedValue({
+            exists: true,
+            data: () => ({
+              userId: 'user123',
+              photos: [{
+                id: 'photo1',
+                url: 'https://storage.googleapis.com/test-bucket/path/photo.jpg',
+                thumbnailUrl: 'https://storage.googleapis.com/test-bucket/path/thumb.jpg'
+              }]
+            })
+          }),
+          update: jest.fn().mockResolvedValue({})
+        }))
+      }));
+
+      const response = await request(app)
+        .delete('/api/campsites/test-id/photos/photo1')
+        .set('Authorization', 'Bearer valid-token');
+
+      expect(response.status).toBe(200);
+    });
+
+    it('should reject photo deletion by non-owner', async () => {
+      mockAuth.verifyIdToken.mockResolvedValue({
+        uid: 'different-user',
+        email: 'other@example.com',
+        email_verified: true
+      });
+
+      mockFirestore.collection.mockImplementation(() => ({
+        doc: jest.fn(() => ({
+          get: jest.fn().mockResolvedValue({
+            exists: true,
+            data: () => ({
+              userId: 'user123',
+              photos: [{ id: 'photo1' }]
+            })
+          })
+        }))
+      }));
+
+      const response = await request(app)
+        .delete('/api/campsites/test-id/photos/photo1')
+        .set('Authorization', 'Bearer valid-token');
+
+      expect(response.status).toBe(403);
+    });
+
+    it('should return 404 for non-existent photo', async () => {
+      mockAuth.verifyIdToken.mockResolvedValue({
+        uid: 'user123',
+        email: 'test@example.com',
+        email_verified: true
+      });
+
+      mockFirestore.collection.mockImplementation(() => ({
+        doc: jest.fn(() => ({
+          get: jest.fn().mockResolvedValue({
+            exists: true,
+            data: () => ({
+              userId: 'user123',
+              photos: []
+            })
+          })
+        }))
+      }));
+
+      const response = await request(app)
+        .delete('/api/campsites/test-id/photos/nonexistent')
+        .set('Authorization', 'Bearer valid-token');
+
+      expect(response.status).toBe(404);
+    });
+  });
+
+  describe('Reviews - GET endpoint', () => {
+    const reviewsRouter = require('../routes/reviews');
+
+    beforeEach(() => {
+      app = express();
+      app.use('/api/campsites', reviewsRouter);
+      jest.clearAllMocks();
+
+      // Mock auth getUser
+      const mockAuthAdmin = require('firebase-admin').auth();
+      mockAuthAdmin.getUser = jest.fn().mockResolvedValue({
+        uid: 'user123',
+        displayName: 'Test User',
+        email: 'test@example.com'
+      });
+    });
+
+    it('should get reviews for a campsite', async () => {
+      mockFirestore.collection.mockImplementation((name) => {
+        if (name === 'campsites') {
+          return {
+            doc: jest.fn(() => ({
+              get: jest.fn().mockResolvedValue({
+                exists: true,
+                data: () => ({ title: 'Test Campsite' })
+              })
+            }))
+          };
+        }
+        if (name === 'reviews') {
+          return {
+            where: jest.fn(() => ({
+              where: jest.fn(function() { return this; }),
+              orderBy: jest.fn(function() { return this; }),
+              limit: jest.fn(function() { return this; }),
+              offset: jest.fn(function() { return this; }),
+              get: jest.fn().mockResolvedValue({
+                size: 1,
+                docs: [{
+                  id: 'review1',
+                  data: () => ({
+                    rating: 5,
+                    comment: 'Great!',
+                    userId: 'user123',
+                    createdAt: new Date(),
+                    updatedAt: new Date()
+                  })
+                }]
+              })
+            }))
+          };
+        }
+        return mockCollection(name);
+      });
+
+      const response = await request(app)
+        .get('/api/campsites/test-id/reviews');
+
+      expect(response.status).toBe(200);
+      expect(response.body.reviews).toBeDefined();
+      expect(Array.isArray(response.body.reviews)).toBe(true);
+    });
+
+    it('should sort reviews by highest rating', async () => {
+      mockFirestore.collection.mockImplementation((name) => {
+        if (name === 'campsites') {
+          return {
+            doc: jest.fn(() => ({
+              get: jest.fn().mockResolvedValue({
+                exists: true,
+                data: () => ({ title: 'Test' })
+              })
+            }))
+          };
+        }
+        if (name === 'reviews') {
+          return {
+            where: jest.fn(() => ({
+              where: jest.fn(function() { return this; }),
+              orderBy: jest.fn(function() { return this; }),
+              limit: jest.fn(function() { return this; }),
+              offset: jest.fn(function() { return this; }),
+              get: jest.fn().mockResolvedValue({
+                size: 0,
+                docs: []
+              })
+            }))
+          };
+        }
+        return mockCollection(name);
+      });
+
+      const response = await request(app)
+        .get('/api/campsites/test-id/reviews')
+        .query({ sort: 'highest' });
+
+      expect(response.status).toBe(200);
+    });
+
+    it('should sort reviews by lowest rating', async () => {
+      mockFirestore.collection.mockImplementation((name) => {
+        if (name === 'campsites') {
+          return {
+            doc: jest.fn(() => ({
+              get: jest.fn().mockResolvedValue({
+                exists: true,
+                data: () => ({ title: 'Test' })
+              })
+            }))
+          };
+        }
+        if (name === 'reviews') {
+          return {
+            where: jest.fn(() => ({
+              where: jest.fn(function() { return this; }),
+              orderBy: jest.fn(function() { return this; }),
+              limit: jest.fn(function() { return this; }),
+              offset: jest.fn(function() { return this; }),
+              get: jest.fn().mockResolvedValue({
+                size: 0,
+                docs: []
+              })
+            }))
+          };
+        }
+        return mockCollection(name);
+      });
+
+      const response = await request(app)
+        .get('/api/campsites/test-id/reviews')
+        .query({ sort: 'lowest' });
+
+      expect(response.status).toBe(200);
+    });
+
+    it('should return 404 for non-existent campsite', async () => {
+      mockFirestore.collection.mockImplementation((name) => {
+        if (name === 'campsites') {
+          return {
+            doc: jest.fn(() => ({
+              get: jest.fn().mockResolvedValue({
+                exists: false
+              })
+            }))
+          };
+        }
+        return mockCollection(name);
+      });
+
+      const response = await request(app)
+        .get('/api/campsites/nonexistent/reviews');
+
+      expect(response.status).toBe(404);
+    });
+  });
+});

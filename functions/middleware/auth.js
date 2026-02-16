@@ -7,7 +7,7 @@ const admin = require('firebase-admin');
  */
 async function verifyFirebaseToken(req, res, next) {
   const authHeader = req.header('Authorization');
-  
+
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return res.status(401).json({ error: 'No token provided' });
   }
@@ -34,7 +34,7 @@ async function verifyFirebaseToken(req, res, next) {
  */
 async function optionalAuth(req, res, next) {
   const authHeader = req.header('Authorization');
-  
+
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     req.user = null;
     return next();
@@ -53,7 +53,7 @@ async function optionalAuth(req, res, next) {
     console.error('Token verification error (optional):', error);
     req.user = null;
   }
-  
+
   next();
 }
 
