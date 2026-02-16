@@ -3,9 +3,6 @@
   "description": "Firebase Functions for Dispersed API",
   "version": "1.0.0",
   "main": "index.js",
-  "engines": {
-    "node": ">=20"
-  },
   "scripts": {
     "serve": "firebase emulators:start --only functions",
     "shell": "firebase functions:shell",
