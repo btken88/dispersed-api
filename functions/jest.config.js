@@ -18,5 +18,7 @@ module.exports = {
   testMatch: [
     '**/test/**/*.test.js'
   ],
-  setupFilesAfterEnv: ['<rootDir>/test/setup.js']
+  setupFilesAfterEnv: ['<rootDir>/test/setup.js'],
+  // TODO: Increase coverage thresholds as real tests are implemented
+  // Target: 80% for all metrics with comprehensive integration tests
 };

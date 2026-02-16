@@ -2,6 +2,7 @@ const router = require('express').Router();
 const admin = require('firebase-admin');
 const { check, validationResult } = require('express-validator');
 const { verifyFirebaseToken, optionalAuth } = require('../middleware/auth');
+const geohash = require('geofire-common');
 
 const db = admin.firestore();
 const campsitesRef = db.collection('campsites');
@@ -14,32 +15,32 @@ const campsitesRef = db.collection('campsites');
 router.get('/', optionalAuth, async (req, res) => {
   try {
     let query = campsitesRef;
-    
+
     if (req.user) {
       // Authenticated: show public campsites + user's own private/unlisted sites
       // This requires a composite query or multiple queries
       const publicQuery = campsitesRef.where('visibility', '==', 'public').get();
       const userQuery = campsitesRef.where('userId', '==', req.user.uid).get();
-      
+
       const [publicSnapshot, userSnapshot] = await Promise.all([publicQuery, userQuery]);
-      
+
       const campsites = [];
       const seenIds = new Set();
-      
+
       publicSnapshot.forEach(doc => {
         if (!seenIds.has(doc.id)) {
           campsites.push({ id: doc.id, ...doc.data() });
           seenIds.add(doc.id);
         }
       });
-      
+
       userSnapshot.forEach(doc => {
         if (!seenIds.has(doc.id)) {
           campsites.push({ id: doc.id, ...doc.data() });
           seenIds.add(doc.id);
         }
       });
-      
+
       return res.json(campsites);
     } else {
       // Unauthenticated: only show public campsites
@@ -61,26 +62,26 @@ router.get('/', optionalAuth, async (req, res) => {
 router.get('/:id', optionalAuth, async (req, res) => {
   try {
     const doc = await campsitesRef.doc(req.params.id).get();
-    
+
     if (!doc.exists) {
       return res.status(404).json({ error: 'Campsite not found' });
     }
-    
+
     const campsite = { id: doc.id, ...doc.data() };
-    
+
     // Check if user can view this campsite
     if (campsite.visibility === 'public') {
       return res.json(campsite);
     }
-    
+
     if (req.user && campsite.userId === req.user.uid) {
       return res.json(campsite);
     }
-    
+
     if (campsite.visibility === 'unlisted') {
       return res.json(campsite);
     }
-    
+
     return res.status(403).json({ error: 'Access denied' });
   } catch (error) {
     console.error('Error fetching campsite:', error);
@@ -112,6 +113,9 @@ router.post(
     const { latitude, longitude, title, description, visibility } = req.body;
 
     try {
+      // Calculate geohash for geographic queries
+      const hash = geohash.geohashForLocation([latitude, longitude]);
+
       const campsite = {
         userId: req.user.uid,
         location: new admin.firestore.GeoPoint(latitude, longitude),
@@ -120,6 +124,9 @@ router.post(
         title,
         description: description || '',
         visibility,
+        geohash: hash,
+        hasPhotos: false,
+        photos: [],
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
       };
