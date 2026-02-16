@@ -10,7 +10,6 @@ const rateLimit = require('express-rate-limit');
 
 // Define secrets for 2nd Gen functions
 const openweatherApiKey = defineSecret('OPENWEATHER_API_KEY');
-const mapquestApiKey = defineSecret('MAPQUEST_API_KEY');
 
 // Initialize Firebase Admin
 admin.initializeApp();
@@ -79,10 +78,10 @@ app.use((err, req, res, next) => {
 });
 
 // Export Express app as 2nd Gen Firebase Function
-// Secrets will be available via process.env.OPENWEATHER_API_KEY and process.env.MAPQUEST_API_KEY
+// Secrets will be available via process.env.OPENWEATHER_API_KEY
 exports.api = onRequest(
   {
-    secrets: [openweatherApiKey, mapquestApiKey],
+    secrets: [openweatherApiKey],
     region: 'us-central1',
     memory: '256MiB'
   },

@@ -22,18 +22,11 @@ router.get('/:lat/:lng', optionalAuth, async (req, res) => {
   }
 
   try {
-    const MAPQUEST_API_KEY = process.env.MAPQUEST_API_KEY;
+    // Using Open-Meteo Elevation API (free, no API key required)
+    // https://open-meteo.com/en/docs#elevation
+    const url = `https://api.open-meteo.com/v1/elevation?latitude=${latitude}&longitude=${longitude}`;
 
-    if (!MAPQUEST_API_KEY) {
-      console.error('MAPQUEST_API_KEY not found in environment');
-      return res.status(503).json({ error: 'Elevation service not configured' });
-    }
-
-    // Using MapQuest Elevation API
-    // The Elevation API uses the open subdomain
-    const url = `https://open.mapquestapi.com/elevation/v1/profile?key=${MAPQUEST_API_KEY}&shapeFormat=raw&latLngCollection=${latitude},${longitude}`;
-
-    console.log('Fetching elevation from:', url.replace(MAPQUEST_API_KEY, 'REDACTED'));
+    console.log('Fetching elevation from:', url);
 
     const response = await fetch(url);
 
@@ -48,12 +41,12 @@ router.get('/:lat/:lng', optionalAuth, async (req, res) => {
 
     const data = await response.json();
 
-    if (!data.elevationProfile || data.elevationProfile.length === 0) {
+    if (!data.elevation || data.elevation.length === 0) {
       throw new Error('No elevation data found');
     }
 
-    // MapQuest returns elevation in meters by default, convert to feet
-    const elevationMeters = data.elevationProfile[0].height;
+    // Open-Meteo returns elevation in meters
+    const elevationMeters = data.elevation[0];
     const elevationFeet = Math.floor(elevationMeters * 3.28084);
 
     const elevationData = {
